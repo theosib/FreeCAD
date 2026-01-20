@@ -397,13 +397,257 @@ path.size();           // 3 components: "Body", "Pad", ""
 - Qt's `QDir`/`QFileInfo` - file path handling
 - Boost.Filesystem - cross-platform path operations
 
+## Revised Approach: Centralized Path Library
+
+### Philosophy
+
+Rather than creating a new class that changes how paths are stored, the goal should be:
+
+1. **Centralize all path manipulation logic** into a single library
+2. **Continue using strings internally** (short-term or long-term)
+3. **Provide comprehensive functions** for all path operations
+4. **Fix bugs in one place** rather than scattered across modules
+5. **Ensure TNP compatibility** - no regressions in topological naming
+
+### Key Insight
+
+The problem isn't that we use strings - it's that every module implements its own path manipulation logic. This leads to:
+- Inconsistent handling of edge cases (trailing dots, mapped elements)
+- Duplicated bugs across modules
+- Different interpretations of path semantics
+
+### Proposed Library Structure
+
+**Location:** `src/Base/SubNamePath.h` and `src/Base/SubNamePath.cpp`
+
+```cpp
+namespace Base {
+namespace SubNamePath {
+
+// ============================================================
+// Core Parsing Functions
+// ============================================================
+
+/// Split path into components, correctly handling trailing dots
+std::vector<std::string> split(const std::string& path);
+
+/// Join components back into a path string
+std::string join(const std::vector<std::string>& components);
+
+/// Join with custom separator (usually ".")
+std::string join(const std::vector<std::string>& components, const std::string& sep);
+
+// ============================================================
+// Navigation Functions
+// ============================================================
+
+/// Get the first component of a path
+/// "Part.Body.Pad.Face1" -> "Part"
+std::string_view front(const std::string& path);
+
+/// Get the last component of a path
+/// "Part.Body.Pad.Face1" -> "Face1"
+std::string_view back(const std::string& path);
+
+/// Get path without the first component
+/// "Part.Body.Pad.Face1" -> "Body.Pad.Face1"
+std::string tail(const std::string& path);
+
+/// Get path without the last component
+/// "Part.Body.Pad.Face1" -> "Part.Body.Pad"
+std::string parent(const std::string& path);
+
+/// Append a component to a path
+/// ("Part.Body", "Pad") -> "Part.Body.Pad"
+std::string append(const std::string& path, const std::string& component);
+
+/// Append multiple components
+std::string append(const std::string& path, const std::vector<std::string>& components);
+
+/// Get components from index start to end (exclusive)
+/// Equivalent to names[start:end] in Python
+std::string slice(const std::string& path, size_t start, size_t end = std::string::npos);
+
+// ============================================================
+// Element Name Functions (integrates ElementNamingUtils logic)
+// ============================================================
+
+/// Check if path ends with an element name (Edge1, Face2, etc.)
+bool hasElement(const std::string& path);
+
+/// Get the element name portion
+/// "Part.Body.Pad.Face1" -> "Face1"
+std::string_view elementName(const std::string& path);
+
+/// Get path without the element name
+/// "Part.Body.Pad.Face1" -> "Part.Body.Pad"
+std::string withoutElement(const std::string& path);
+
+/// Get element type (Edge, Face, Vertex, Wire, etc.)
+/// "Face1" -> "Face"
+std::string_view elementType(const std::string& elementName);
+
+/// Get element index
+/// "Face1" -> 1
+int elementIndex(const std::string& elementName);
+
+/// Check for mapped element (starts with ';')
+bool hasMappedElement(const std::string& path);
+
+/// Check for missing element marker ('?')
+bool hasMissingElement(const std::string& path);
+
+/// Find where element name starts in path (returns pointer into string)
+const char* findElementName(const std::string& path);
+
+// ============================================================
+// Link Array / Index Handling
+// ============================================================
+
+/// Check if first component is a numeric index (link array)
+/// "0.Pad.Face1" -> true
+bool hasArrayIndex(const std::string& path);
+
+/// Get the array index if present
+/// "0.Pad.Face1" -> 0
+int arrayIndex(const std::string& path);
+
+/// Get path without the array index
+/// "0.Pad.Face1" -> "Pad.Face1"
+std::string withoutArrayIndex(const std::string& path);
+
+// ============================================================
+// Validation
+// ============================================================
+
+/// Check if path is well-formed
+bool isValid(const std::string& path);
+
+/// Check if path is empty or contains only whitespace
+bool isEmpty(const std::string& path);
+
+/// Count number of components
+size_t componentCount(const std::string& path);
+
+// ============================================================
+// Comparison
+// ============================================================
+
+/// Check if two paths are equivalent (handles trailing dot normalization)
+bool equivalent(const std::string& path1, const std::string& path2);
+
+/// Check if path starts with prefix
+bool startsWith(const std::string& path, const std::string& prefix);
+
+/// Check if path ends with suffix
+bool endsWith(const std::string& path, const std::string& suffix);
+
+} // namespace SubNamePath
+} // namespace Base
+```
+
+### Example: Refactoring Common Pattern
+
+**Before (scattered in multiple files):**
+```cpp
+// DocumentObject.cpp
+std::vector<std::string> names = Base::Tools::splitSubName(sub);
+if (names.empty()) return plc;
+DocumentObject* subObj = getDocument()->getObject(names.front().c_str());
+if (!subObj) return plc;
+std::vector<std::string> newNames(names.begin() + 1, names.end());
+std::string newSub = Base::Tools::joinList(newNames, ".");
+return plc * subObj->getPlacementOf(newSub, targetObj);
+```
+
+**After (using centralized library):**
+```cpp
+// DocumentObject.cpp
+using namespace Base::SubNamePath;
+if (isEmpty(sub)) return plc;
+DocumentObject* subObj = getDocument()->getObject(std::string(front(sub)).c_str());
+if (!subObj) return plc;
+return plc * subObj->getPlacementOf(tail(sub), targetObj);
+```
+
+### TNP (Topological Naming Problem) Considerations
+
+The path library must be **TNP-aware** and not introduce regressions:
+
+1. **Preserve Element Map Prefixes**
+   - Never strip or modify `;` prefixes
+   - `hasMappedElement()` and `findElementName()` must handle mapped names correctly
+
+2. **Handle Dual Naming**
+   - Support both old-style (`Face1`) and new-style (`;Face1;:H...`) element names
+   - Integrate with existing `ElementNamingUtils` functions
+
+3. **Maintain Path Integrity**
+   - Round-trip guarantee: `join(split(path)) == path`
+   - Preserve trailing dots exactly
+   - Don't lose any path information during manipulation
+
+4. **Test Against TNP Scenarios**
+   - Create test suite with mapped element names
+   - Test with external geometry references
+   - Test with link arrays and sub-assemblies
+
+### Migration Strategy (Revised)
+
+**Phase 1: Create Library**
+- Implement `Base::SubNamePath` namespace with all functions
+- Write comprehensive unit tests including TNP cases
+- Document all edge cases and behaviors
+
+**Phase 2: Add Forwarding in Tools**
+- Make `Base::Tools::splitSubName` call `SubNamePath::split`
+- Make `Base::Tools::joinList` call `SubNamePath::join` for "." separator
+- This catches all existing callers automatically
+
+**Phase 3: Direct Migration (Optional)**
+- Update code to use `SubNamePath` directly for cleaner intent
+- New code uses `SubNamePath` exclusively
+- Keep `Tools` functions as deprecated aliases
+
+**Phase 4: Extend as Needed**
+- Add new operations as patterns emerge
+- Optimize hot paths based on profiling
+- Consider optional `ObjectPath` class wrapper if type safety becomes valuable
+
+### Benefits of This Approach
+
+1. **Minimal Risk**
+   - Strings remain the storage format
+   - Existing code continues to work
+   - Changes are incremental and testable
+
+2. **Centralized Bug Fixes**
+   - Fix trailing dot handling once
+   - Fix element name parsing once
+   - All callers benefit automatically
+
+3. **TNP Safe**
+   - Library designed with TNP awareness from start
+   - Explicit functions for mapped elements
+   - Test suite covers TNP scenarios
+
+4. **Gradual Adoption**
+   - No big-bang migration required
+   - Teams can adopt at their own pace
+   - Easy to audit and review
+
+5. **Future Flexibility**
+   - Can add `ObjectPath` class later if desired
+   - Library functions become implementation of class methods
+   - No wasted work either way
+
 ## Summary
 
-A dedicated `ObjectPath` class would:
-1. **Reduce bugs** - Type safety prevents malformed paths
-2. **Improve readability** - Clear intent with named operations
-3. **Eliminate duplication** - Standard way to manipulate paths
-4. **Improve performance** - Avoid repeated parsing
-5. **Simplify code** - Replace verbose split/join patterns
+A centralized path library would:
+1. **Consolidate scattered logic** - One place for all path operations
+2. **Fix bugs once** - All modules benefit from fixes
+3. **Maintain string compatibility** - No storage format changes required
+4. **Be TNP-aware** - Designed to handle element naming correctly
+5. **Enable gradual migration** - Low risk, incremental adoption
 
-The implicit conversion from `std::string` allows gradual adoption without breaking existing code.
+The focus should be on **correctness and consolidation** rather than changing data representation.
