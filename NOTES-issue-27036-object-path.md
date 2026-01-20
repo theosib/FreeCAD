@@ -318,30 +318,9 @@ public:
 };
 ```
 
-## Migration Strategy
-
-### Phase 1: Add ObjectPath Class
-- Implement `Base::ObjectPath` in `src/Base/ObjectPath.h` and `src/Base/ObjectPath.cpp`
-- Implicit conversions allow gradual adoption
-- No changes to existing code required
-
-### Phase 2: Update Utility Functions
-- Add ObjectPath overloads to frequently used functions
-- Keep string versions for compatibility
-
-### Phase 3: Gradual Migration
-- Update high-traffic code paths first (Selection, Link, Assembly)
-- Use ObjectPath in new code
-- Deprecate string-based patterns over time
-
-### Phase 4: Optimization
-- Cache parsed components for repeated access
-- Avoid allocations for common operations
-- Profile and optimize hot paths
-
 ## Implementation Considerations
 
-### Memory Layout Options
+### Memory Layout Options (if class wrapper desired later)
 
 **Option A: Store original string + cached offsets**
 ```cpp
@@ -359,30 +338,13 @@ mutable std::string m_cachedPath;
 - Pro: Fast iteration and component access
 - Con: More allocations, need to rebuild string for c_str()
 
-**Option C: Small string optimization**
-```cpp
-union {
-    char m_small[32];
-    struct { char* ptr; size_t len; size_t cap; } m_large;
-};
-```
-- Pro: No allocation for short paths
-- Con: Complexity
-
-**Recommendation:** Option A with lazy offset computation provides the best balance.
-
-### Thread Safety
-- ObjectPath should be value type (copyable, movable)
-- Const methods should be thread-safe
-- Mutable cached data needs synchronization or per-call computation
+**Recommendation:** Option A with lazy offset computation provides the best balance if a class wrapper is desired.
 
 ### Trailing Dot Handling
 ```cpp
-ObjectPath path = "Body.Pad.";
-path.hasElement();     // true (empty element)
-path.elementName();    // "" (empty string)
-path.back();           // ""
-path.size();           // 3 components: "Body", "Pad", ""
+// "Body.Pad." has 3 components: "Body", "Pad", ""
+// The empty string represents an empty element name
+// This is significant and must be preserved
 ```
 
 ## Related Work
@@ -397,7 +359,7 @@ path.size();           // 3 components: "Body", "Pad", ""
 - Qt's `QDir`/`QFileInfo` - file path handling
 - Boost.Filesystem - cross-platform path operations
 
-## Revised Approach: Centralized Path Library
+## Recommended Approach: Centralized Path Library
 
 ### Philosophy
 
@@ -592,29 +554,76 @@ The path library must be **TNP-aware** and not introduce regressions:
    - Test with external geometry references
    - Test with link arrays and sub-assemblies
 
-### Migration Strategy (Revised)
+## Important Design Constraint: Paths Are Dumb Data
 
-**Phase 1: Create Library**
+### The Rename Problem
+
+A key insight from community discussion: **paths should be dumb objects** that are not observed or updated.
+
+When an object is renamed (e.g., `Pad` → `Pad001`), paths containing that object name become invalid. Currently:
+- The **Expression Engine** handles renames by observing and updating expressions
+- The **PropertyLink family** handles renames for linked objects
+
+A path library should **NOT** try to handle renames. This is the job of:
+- `PropertyLinkSub` and related classes for stored references
+- Expression engine for expressions containing paths
+- Higher-level code that manages document relationships
+
+### Implications for Library Design
+
+The path library should be:
+1. **Pure string manipulation** - No document awareness
+2. **Stateless** - No observers, no update mechanisms
+3. **Fast and simple** - Just parsing and composing strings
+
+The library provides **tools**, not **managed references**. Code that needs rename-aware paths should use `PropertyLinkSub` or similar.
+
+```cpp
+// Path library: dumb string manipulation
+std::string newPath = SubNamePath::append("Body", "Pad");  // Just builds "Body.Pad"
+
+// PropertyLinkSub: smart reference with rename tracking
+myProperty.setValue(obj, {"Face1"});  // Tracks object, handles renames
+```
+
+### What This Library Does NOT Do
+
+- ❌ Track object renames
+- ❌ Validate that paths point to existing objects
+- ❌ Observe document changes
+- ❌ Update stored paths when objects change
+
+### What This Library DOES Do
+
+- ✅ Parse paths into components
+- ✅ Compose paths from components
+- ✅ Extract element names, types, indices
+- ✅ Handle special cases (trailing dots, mapped elements, array indices)
+- ✅ Provide consistent behavior across all callers
+
+## Migration Strategy
+
+### Phase 1: Create Library
 - Implement `Base::SubNamePath` namespace with all functions
 - Write comprehensive unit tests including TNP cases
 - Document all edge cases and behaviors
 
-**Phase 2: Add Forwarding in Tools**
+### Phase 2: Add Forwarding in Tools
 - Make `Base::Tools::splitSubName` call `SubNamePath::split`
 - Make `Base::Tools::joinList` call `SubNamePath::join` for "." separator
 - This catches all existing callers automatically
 
-**Phase 3: Direct Migration (Optional)**
+### Phase 3: Direct Migration (Optional)
 - Update code to use `SubNamePath` directly for cleaner intent
 - New code uses `SubNamePath` exclusively
 - Keep `Tools` functions as deprecated aliases
 
-**Phase 4: Extend as Needed**
+### Phase 4: Extend as Needed
 - Add new operations as patterns emerge
 - Optimize hot paths based on profiling
-- Consider optional `ObjectPath` class wrapper if type safety becomes valuable
+- Consider optional class wrapper if type safety becomes valuable
 
-### Benefits of This Approach
+## Benefits
 
 1. **Minimal Risk**
    - Strings remain the storage format
@@ -636,10 +645,10 @@ The path library must be **TNP-aware** and not introduce regressions:
    - Teams can adopt at their own pace
    - Easy to audit and review
 
-5. **Future Flexibility**
-   - Can add `ObjectPath` class later if desired
-   - Library functions become implementation of class methods
-   - No wasted work either way
+5. **Clear Separation of Concerns**
+   - Path library: string manipulation only
+   - PropertyLink family: reference management with rename tracking
+   - No confusion about responsibilities
 
 ## Summary
 
@@ -648,6 +657,7 @@ A centralized path library would:
 2. **Fix bugs once** - All modules benefit from fixes
 3. **Maintain string compatibility** - No storage format changes required
 4. **Be TNP-aware** - Designed to handle element naming correctly
-5. **Enable gradual migration** - Low risk, incremental adoption
+5. **Stay dumb** - No rename tracking, that's PropertyLink's job
+6. **Enable gradual migration** - Low risk, incremental adoption
 
-The focus should be on **correctness and consolidation** rather than changing data representation.
+The focus should be on **correctness and consolidation** of string manipulation, leaving reference management to the PropertyLink family.
