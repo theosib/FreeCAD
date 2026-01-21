@@ -2788,7 +2788,12 @@ QImage EditModeConstraintCoinManager::renderConstrIcon(
     font.setBold(true);
     QFontMetrics qfm = QFontMetrics(font);
 
-    int labelWidth = qfm.boundingRect(labels.join(joinStr)).width();
+    // Use horizontalAdvance instead of boundingRect().width() because horizontalAdvance
+    // represents the actual space needed for text rendering, which can be larger than
+    // the bounding rect width. Add a small padding to account for bold font rendering
+    // and anti-aliasing effects that can extend slightly beyond the advance width.
+    // (fixes text cutoff on HiDPI displays, issue #21269)
+    int labelWidth = Gui::QtTools::horizontalAdvance(qfm, labels.join(joinStr)) + 2;
     // See Qt docs on qRect::bottom() for explanation of the +1
     int pxBelowBase = qfm.boundingRect(labels.join(joinStr)).bottom() + 1;
 
