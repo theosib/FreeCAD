@@ -34,6 +34,7 @@
 #include <Base/Exception.h>
 #include <Base/Reader.h>
 #include <Mod/Part/App/FaceMakerCheese.h>
+#include <Mod/Part/App/LoftHelper.h>
 
 #include "Mod/Part/App/TopoShapeOpCode.h"
 
@@ -72,86 +73,8 @@ std::vector<Part::TopoShape> Loft::getSectionShape(
     size_t expected_size
 )
 {
-    auto useSketch = [](App::DocumentObject* obj, const std::vector<std::string>& subs) {
-        // Be smart. If part of a sketch is selected, use the entire sketch unless it is a single
-        // vertex - backward compatibility (#16630)
-        if (!obj) {
-            return false;
-        }
-
-        auto subName = subs.empty() ? "" : subs.front();
-        return obj->isDerivedFrom<Part::Part2DObject>() && subName.find("Vertex") != 0;
-    };
-
-    std::vector<TopoShape> shapes;
-    auto useEntireSketch = useSketch(obj, subs);
-    if (subs.empty() || std::ranges::find(subs, std::string()) != subs.end() || useEntireSketch) {
-        shapes.push_back(
-            Part::Feature::getTopoShape(obj, Part::ShapeOption::ResolveLink | Part::ShapeOption::Transform)
-        );
-        if (shapes.back().isNull()) {
-            std::stringstream str;
-            str << "Failed to get shape of " << name;
-            if (obj) {
-                auto doc = obj->getDocument();
-                str << " " << App::SubObjectT(obj, "").getSubObjectFullName(doc->getName());
-            }
-            THROWM(Part::NullShapeException, str.str());
-        }
-    }
-    else {
-        for (const auto& sub : subs) {
-            shapes.push_back(
-                Part::Feature::getTopoShape(
-                    obj,
-                    Part::ShapeOption::NeedSubElement | Part::ShapeOption::ResolveLink
-                        | Part::ShapeOption::Transform,
-                    sub.c_str()
-                )
-            );
-            if (shapes.back().isNull()) {
-                std::stringstream str;
-                str << "Failed to get shape of " << name;
-                if (obj) {
-                    auto doc = obj->getDocument();
-                    App::SubObjectT subObj(obj, sub.c_str());
-                    str << " " << subObj.getSubObjectFullName(doc->getName());
-                }
-                THROWM(Part::NullShapeException, str.str());
-            }
-        }
-    }
-    auto compound = TopoShape(0).makeElementCompound(
-        shapes,
-        "",
-        TopoShape::SingleShapeCompoundCreationPolicy::returnShape
-    );
-    auto wires = compound.getSubTopoShapes(TopAbs_WIRE);
-    auto edges = compound.getSubTopoShapes(TopAbs_EDGE, TopAbs_WIRE);  // get free edges and make
-                                                                       // wires from it
-    if (!edges.empty()) {
-        auto extra = TopoShape(0).makeElementWires(edges).getSubTopoShapes(TopAbs_WIRE);
-        wires.insert(wires.end(), extra.begin(), extra.end());
-    }
-    const char* msg
-        = "Sections need to have the same amount of wires or vertices as the base section";
-    if (!wires.empty()) {
-        if (expected_size && expected_size != wires.size()) {
-            FC_THROWM(Base::CADKernelError, msg);
-        }
-        return wires;
-    }
-    auto vertices = compound.getSubTopoShapes(TopAbs_VERTEX);
-    if (vertices.empty()) {
-        FC_THROWM(
-            Base::CADKernelError,
-            "Invalid " << name << " shape, expecting either wires or vertices"
-        );
-    }
-    if (expected_size && expected_size != vertices.size()) {
-        FC_THROWM(Base::CADKernelError, msg);
-    }
-    return vertices;
+    // Delegate to shared LoftHelper
+    return Part::LoftHelper::extractProfileWiresFromObject(obj, subs, name, expected_size);
 }
 
 App::DocumentObjectExecReturn* Loft::execute()
@@ -243,31 +166,8 @@ App::DocumentObjectExecReturn* Loft::execute()
             front.move(invObjLoc);
         }
 
-        TopoShape back;
-        if (wiresections[0].back().shapeType() != TopAbs_VERTEX) {
-            std::vector<TopoShape> backwires;
-            for (auto& sectionWires : wiresections) {
-                backwires.push_back(sectionWires.back());
-            }
-            const char* faceMaker[] = {
-                "Part::FaceMakerBullseye",
-                "Part::FaceMakerCheese",
-                "Part::FaceMakerSimple",
-                "Part::FaceMakerUnified",
-            };
-            for (size_t i = 0; i < std::size(faceMaker); i++) {
-                try {
-                    back = TopoShape(0).makeElementFace(backwires, nullptr, faceMaker[i]);
-                    break;
-                }
-                catch (...) {
-                    if (i == std::size(faceMaker) - 1) {
-                        throw;
-                    }
-                    continue;
-                }
-            }
-        }
+        // Create the back face using shared LoftHelper
+        TopoShape back = Part::LoftHelper::makeBackFace(wiresections, hasher);
 
         if (!front.isNull() || !back.isNull()) {
             BRepBuilderAPI_Sewing sewer;

@@ -556,6 +556,8 @@ SET(Part_SRCS
     ExtrusionHelper.h
     FuzzyHelper.cpp
     FuzzyHelper.h
+    LoftHelper.cpp
+    LoftHelper.h
     GeometryExtension.cpp
     GeometryExtension.h
     GeometryDefaultExtension.cpp

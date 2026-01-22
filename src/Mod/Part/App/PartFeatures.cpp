@@ -43,9 +43,13 @@
 #include <TopTools_ListOfShape.hxx>
 
 
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+
 #include <App/Link.h>
 
 #include <App/Document.h>
+#include "LoftHelper.h"
 #include "PartFeatures.h"
 #include "TopoShapeOpCode.h"
 
@@ -225,20 +229,169 @@ App::DocumentObjectExecReturn* Loft::execute()
         return new App::DocumentObjectExecReturn("No sections linked.");
     }
 
+    auto hasher = getDocument()->getStringHasher();
+
     try {
-        std::vector<TopoShape> shapes;
+        // Extract wires from each section using LoftHelper
+        std::vector<std::vector<TopoShape>> allSectionWires;
+        size_t expectedWireCount = 0;
+
         for (auto& obj : Sections.getValues()) {
-            shapes.emplace_back(getTopoShape(obj, ShapeOption::ResolveLink | ShapeOption::Transform));
-            if (shapes.back().isNull()) {
+            TopoShape sectionShape = getTopoShape(obj, ShapeOption::ResolveLink | ShapeOption::Transform);
+            if (sectionShape.isNull()) {
                 return new App::DocumentObjectExecReturn("Invalid section link");
             }
+
+            // Extract wires from this section
+            auto wires = LoftHelper::extractProfileWires(
+                sectionShape,
+                "Section",
+                expectedWireCount
+            );
+
+            if (expectedWireCount == 0) {
+                expectedWireCount = wires.size();
+            }
+
+            allSectionWires.push_back(std::move(wires));
         }
+
         IsSolid isSolid = Solid.getValue() ? IsSolid::solid : IsSolid::notSolid;
         IsRuled isRuled = Ruled.getValue() ? IsRuled::ruled : IsRuled::notRuled;
         IsClosed isClosed = Closed.getValue() ? IsClosed::closed : IsClosed::notClosed;
         int degMax = MaxDegree.getValue();
-        TopoShape result(0, getDocument()->getStringHasher());
-        result.makeElementLoft(shapes, isSolid, isRuled, isClosed, degMax);
+
+        TopoShape result(0, hasher);
+
+        // Check if we have multi-wire profiles
+        bool isMultiWire = (expectedWireCount > 1);
+
+        if (!isMultiWire) {
+            // Simple case: single wire per section - use existing makeElementLoft
+            std::vector<TopoShape> shapes;
+            for (const auto& sectionWires : allSectionWires) {
+                shapes.push_back(sectionWires[0]);
+            }
+            result.makeElementLoft(shapes, isSolid, isRuled, isClosed, degMax);
+        }
+        else {
+            // Multi-wire case: loft each wire group separately, then sew together
+            // Build wire correspondence table: wireSections[wireIndex][sectionIndex]
+            auto wireSections = LoftHelper::buildWireSections(allSectionWires);
+
+            bool closed = (isClosed == IsClosed::closed);
+            // invalid for less than 3 sections
+            if (allSectionWires.size() < 3) {
+                closed = false;
+            }
+
+            // Build all shells (one loft per wire group)
+            std::vector<TopoShape> shells;
+            for (auto& sectionWires : wireSections) {
+                shells.push_back(TopoShape(0, hasher).makeElementLoft(
+                    sectionWires,
+                    IsSolid::notSolid,  // shells only at this stage
+                    isRuled,
+                    closed ? IsClosed::closed : IsClosed::notClosed,
+                    degMax
+                ));
+            }
+
+            if (isSolid == IsSolid::solid) {
+                // Build front and back faces, sew shell, build final solid
+                TopoShape front;
+                TopoShape back;
+
+                if (wireSections[0].front().shapeType() != TopAbs_VERTEX) {
+                    // Create front face from first wires of each wire section
+                    std::vector<TopoShape> frontWires;
+                    for (const auto& sectionWires : wireSections) {
+                        frontWires.push_back(sectionWires.front());
+                    }
+                    // Try different face makers
+                    const char* faceMakers[] = {
+                        "Part::FaceMakerBullseye",
+                        "Part::FaceMakerCheese",
+                        "Part::FaceMakerSimple",
+                    };
+                    for (size_t i = 0; i < std::size(faceMakers); i++) {
+                        try {
+                            front = TopoShape(0, hasher).makeElementFace(frontWires, nullptr, faceMakers[i]);
+                            break;
+                        }
+                        catch (...) {
+                            if (i == std::size(faceMakers) - 1) {
+                                throw;
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                // Create back face using LoftHelper
+                back = LoftHelper::makeBackFace(wireSections, hasher);
+
+                if (!front.isNull() || !back.isNull()) {
+                    BRepBuilderAPI_Sewing sewer;
+                    sewer.SetTolerance(Precision::Confusion());
+                    if (!front.isNull()) {
+                        sewer.Add(front.getShape());
+                    }
+                    if (!back.isNull()) {
+                        sewer.Add(back.getShape());
+                    }
+                    for (auto& s : shells) {
+                        sewer.Add(s.getShape());
+                    }
+
+                    sewer.Perform();
+
+                    if (!front.isNull()) {
+                        shells.push_back(front);
+                    }
+                    if (!back.isNull()) {
+                        shells.push_back(back);
+                    }
+                    result = result.makeShapeWithElementMap(
+                        sewer.SewedShape(),
+                        MapperSewing(sewer),
+                        shells,
+                        OpCodes::Sewing
+                    );
+                }
+
+                if (!result.countSubShapes(TopAbs_SHELL)) {
+                    return new App::DocumentObjectExecReturn("Loft: Failed to create shell");
+                }
+
+                // Convert shells to solids
+                auto shellShapes = result.getSubTopoShapes(TopAbs_SHELL);
+                for (auto& s : shellShapes) {
+                    s = s.makeElementSolid();
+                    BRepClass3d_SolidClassifier SC(s.getShape());
+                    SC.PerformInfinitePoint(Precision::Confusion());
+                    if (SC.State() == TopAbs_IN) {
+                        s.setShape(s.getShape().Reversed(), false);
+                    }
+                }
+
+                if (shellShapes.size() > 1) {
+                    result.makeElementFuse(shellShapes);
+                }
+                else if (!shellShapes.empty()) {
+                    result = shellShapes.front();
+                }
+            }
+            else {
+                // Not solid - just compound the shells
+                result = result.makeElementCompound(
+                    shells,
+                    nullptr,
+                    TopoShape::SingleShapeCompoundCreationPolicy::returnShape
+                );
+            }
+        }
+
         if (Linearize.getValue()) {
             result.linearize(LinearizeFace::linearizeFaces, LinearizeEdge::noEdges);
         }
@@ -246,8 +399,10 @@ App::DocumentObjectExecReturn* Loft::execute()
         return Part::Feature::execute();
     }
     catch (Standard_Failure& e) {
-
         return new App::DocumentObjectExecReturn(e.GetMessageString());
+    }
+    catch (const Base::Exception& e) {
+        return new App::DocumentObjectExecReturn(e.what());
     }
 }
 
