@@ -148,9 +148,23 @@ void LoftWidget::findShapes()
             }
         }
 
-        if (!shape.Infinite()
+        // Accept single face/wire/edge/vertex shapes
+        bool validShape = !shape.Infinite()
             && (shape.ShapeType() == TopAbs_FACE || shape.ShapeType() == TopAbs_WIRE
-                || shape.ShapeType() == TopAbs_EDGE || shape.ShapeType() == TopAbs_VERTEX)) {
+                || shape.ShapeType() == TopAbs_EDGE || shape.ShapeType() == TopAbs_VERTEX);
+
+        // Also accept compounds containing wires (e.g., sketches with multiple closed regions)
+        // This enables multi-wire loft profiles for creating hollow shapes
+        if (!validShape && shape.ShapeType() == TopAbs_COMPOUND) {
+            int wireCount = topoShape.countSubShapes(TopAbs_WIRE);
+            int vertexCount = topoShape.countSubShapes(TopAbs_VERTEX);
+            // Accept if compound has wires or vertices (potential loft sections)
+            if (wireCount > 0 || vertexCount > 0) {
+                validShape = true;
+            }
+        }
+
+        if (validShape) {
             QString label = QString::fromUtf8(obj->Label.getValue());
             QString name = QString::fromLatin1(obj->getNameInDocument());
             QTreeWidgetItem* child = new QTreeWidgetItem();
