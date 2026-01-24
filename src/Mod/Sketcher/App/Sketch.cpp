@@ -819,6 +819,28 @@ int Sketch::addLineSegment(const Part::GeomLineSegment& lineSegment, bool fixed)
     Base::Vector3d start = lineSeg->getStartPoint();
     Base::Vector3d end = lineSeg->getEndPoint();
 
+    // For fixed (external) geometry, snap nearly-horizontal or nearly-vertical lines
+    // to be exactly horizontal/vertical. This prevents numerical instability in the
+    // constraint solver when external geometry has floating point noise from projection.
+    // Use Precision::Approximation() (1e-6) as threshold since projection errors can
+    // exceed Precision::Confusion() (1e-7).
+    // See: https://github.com/FreeCAD/FreeCAD/issues/26980
+    if (fixed) {
+        double tol = Precision::Approximation();
+        // Snap nearly-horizontal lines
+        if (fabs(start.y - end.y) < tol && fabs(start.y - end.y) > 0) {
+            double avgY = (start.y + end.y) / 2.0;
+            start.y = avgY;
+            end.y = avgY;
+        }
+        // Snap nearly-vertical lines
+        if (fabs(start.x - end.x) < tol && fabs(start.x - end.x) > 0) {
+            double avgX = (start.x + end.x) / 2.0;
+            start.x = avgX;
+            end.x = avgX;
+        }
+    }
+
     // the points for later constraints
     GCS::Point p1, p2;
 

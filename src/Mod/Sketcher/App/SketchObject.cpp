@@ -8076,6 +8076,31 @@ static gp_Pnt ProjPointOnPlane_XYZ(const gp_Pnt& P, const gp_Pln& Pl)
                       .XYZ());
 }
 
+// Auxiliary method: snap nearly-horizontal or nearly-vertical line segment endpoints
+// to be exactly horizontal/vertical. This prevents numerical instability in the
+// constraint solver when external geometry has floating point noise.
+// Use Precision::Approximation() (1e-6) as threshold since projection errors can
+// exceed Precision::Confusion() (1e-7).
+// See: https://github.com/FreeCAD/FreeCAD/issues/26980
+static void snapLineEndpointsToHV(Base::Vector3d& p1, Base::Vector3d& p2)
+{
+    double tol = Precision::Approximation();
+
+    // Snap nearly-horizontal lines (Y coordinates nearly equal)
+    if (fabs(p1.y - p2.y) < tol && fabs(p1.y - p2.y) > 0) {
+        double avgY = (p1.y + p2.y) / 2.0;
+        p1.y = avgY;
+        p2.y = avgY;
+    }
+
+    // Snap nearly-vertical lines (X coordinates nearly equal)
+    if (fabs(p1.x - p2.x) < tol && fabs(p1.x - p2.x) > 0) {
+        double avgX = (p1.x + p2.x) / 2.0;
+        p1.x = avgX;
+        p2.x = avgX;
+    }
+}
+
 // Auxiliary method
 Part::Geometry* projectLine(const BRepAdaptor_Curve& curve, const Handle(Geom_Plane) & gPlane,
                             const Base::Placement& invPlm)
@@ -8114,6 +8139,7 @@ Part::Geometry* projectLine(const BRepAdaptor_Curve& curve, const Handle(Geom_Pl
         return point;
     }
     else {
+        snapLineEndpointsToHV(p1, p2);
         auto* line = new Part::GeomLineSegment();
         line->setPoints(p1, p2);
         GeometryFacade::setConstruction(line, true);
@@ -8654,6 +8680,7 @@ void processEdge(const TopoDS_Edge& edge,
                 invPlm.multVec(p1, p1);
                 invPlm.multVec(p2, p2);
 
+                snapLineEndpointsToHV(p1, p2);
                 projectedSegment->setPoints(p1, p2);
                 GeometryFacade::setConstruction(projectedSegment, true);
                 geos.emplace_back(projectedSegment);
@@ -8808,10 +8835,12 @@ void processEdge(const TopoDS_Edge& edge,
                 gp_Vec start = gp_Vec(destCenter.XYZ()) + destAxisMajor;
                 gp_Vec end = gp_Vec(destCenter.XYZ()) - destAxisMajor;
 
+                Base::Vector3d p1(start.X(), start.Y(), start.Z());
+                Base::Vector3d p2(end.X(), end.Y(), end.Z());
+                snapLineEndpointsToHV(p1, p2);
+
                 auto* projectedSegment = new Part::GeomLineSegment();
-                projectedSegment->setPoints(
-                    Base::Vector3d(start.X(), start.Y(), start.Z()),
-                    Base::Vector3d(end.X(), end.Y(), end.Z()));
+                projectedSegment->setPoints(p1, p2);
                 GeometryFacade::setConstruction(projectedSegment, true);
                 geos.emplace_back(projectedSegment);
             }
@@ -8900,6 +8929,7 @@ void processEdge(const TopoDS_Edge& edge,
                 geos.emplace_back(point);
             }
             else {
+                snapLineEndpointsToHV(P1, P2);
                 auto* projectedSegment = new Part::GeomLineSegment();
                 projectedSegment->setPoints(P1, P2);
                 GeometryFacade::setConstruction(projectedSegment, true);
