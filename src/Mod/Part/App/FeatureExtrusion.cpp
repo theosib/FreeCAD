@@ -511,6 +511,30 @@ void Extrusion::Restore(Base::XMLReader& reader)
     }
 }
 
+void Extrusion::handleChangedPropertyType(Base::XMLReader& reader,
+                                          const char* TypeName,
+                                          App::Property* prop)
+{
+    // Handle migration from PropertyLink to PropertyLinkSub for Base property
+    if (prop == &Base && strcmp(TypeName, "App::PropertyLink") == 0) {
+        // Read the PropertyLink XML format directly: <Link value="ObjectName"/>
+        reader.readElement("Link");
+        std::string name = reader.getName(reader.getAttribute<const char*>("value"));
+
+        if (!name.empty()) {
+            App::Document* document = getDocument();
+            App::DocumentObject* object = document ? document->getObject(name.c_str()) : nullptr;
+            if (object) {
+                // Convert PropertyLink to PropertyLinkSub (with empty sub-element list)
+                Base.setValue(object);
+            }
+        }
+    }
+    else {
+        Part::Feature::handleChangedPropertyType(reader, TypeName, prop);
+    }
+}
+
 void Part::Extrusion::onChanged(const App::Property* prop)
 {
     if (prop == &FaceMakerMode) {
