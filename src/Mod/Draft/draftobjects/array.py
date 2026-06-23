@@ -430,9 +430,16 @@ class Array(DraftLink):
                 )
                 raise TypeError(_info)
 
+        # Use the base shape's placement: a link's own Placement may be identity
+        # while its real placement is inherited from the linked object.
+        base_placement = obj.Base.Placement
+        base_shape = getattr(obj.Base, "Shape", None)
+        if base_shape is not None and not base_shape.isNull():
+            base_placement = base_shape.Placement
+
         if obj.ArrayType == "ortho":
             pls = rect_placements(
-                obj.Base.Placement,
+                base_placement,
                 obj.IntervalX,
                 obj.IntervalY,
                 obj.IntervalZ,
@@ -443,11 +450,11 @@ class Array(DraftLink):
         elif obj.ArrayType == "polar":
             av = obj.IntervalAxis if hasattr(obj, "IntervalAxis") else None
             pls = polar_placements(
-                obj.Base.Placement, center, obj.Angle.Value, obj.NumberPolar, axis, av
+                base_placement, center, obj.Angle.Value, obj.NumberPolar, axis, av
             )
         elif obj.ArrayType == "circular":
             pls = circ_placements(
-                obj.Base.Placement,
+                base_placement,
                 obj.RadialDistance,
                 obj.TangentialDistance,
                 axis,
