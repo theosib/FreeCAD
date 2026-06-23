@@ -36,6 +36,7 @@
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopLoc_Location.hxx>
 
 
 #include <Mod/Part/App/PrimitiveFeature.h>
@@ -324,6 +325,15 @@ App::DocumentObjectExecReturn* Mirroring::execute()
                 BRepBuilderAPI_Transform mkTrf(shape.getShape(), trsf, Standard_True);
                 shape = TopoShape(mkTrf.Shape());
             }
+        }
+
+        // A link's placement may live in the shape location, not its Placement.
+        // Bake it in so it survives storage of the mirrored shape.
+        if (!shape.getShape().Location().IsIdentity()) {
+            TopoDS_Shape located = shape.getShape();
+            gp_Trsf trsf = located.Location().Transformation();
+            located.Location(TopLoc_Location());
+            shape = TopoShape(BRepBuilderAPI_Transform(located, trsf, Standard_True).Shape());
         }
 
         gp_Ax2 ax2(gp_Pnt(base.x, base.y, base.z), gp_Dir(norm.x, norm.y, norm.z));
